@@ -1,0 +1,539 @@
+---
+title: "Code Challenge: Data Harmonization"
+author: "Yao-Chieh Yao"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+format:
+    html:
+        fontsize: 14px
+        toc: true
+        toc_depth: 4
+        toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, 
+                      message = FALSE, collapse = TRUE)
+```
+
+# Introduction
+
+## curatedMetagenomicData
+The curatedMetagenomicData (cMD) package provides standardized, curated human 
+microbiome data for novel analyses. It includes six different data types - 
+gene families, marker abundance, marker presence, pathway abundance, 
+pathway coverage, and relative abundance - for samples collected from 
+different body sites. Also, the manually curated sample metadata are included.
+However, parts of metadata are still not fully harmonized, contain some 
+curation errors, and use arbitrary terms instead of controlled 
+language/ontology. In this code challenge, you need to harmonize and curate 
+one of the two attributes in the cMD package's sample metadata: 1) age-related
+or 2) disease-related information.
+
+Here is the sample metadata table:
+
+```{r install_package, echo=FALSE}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("curatedMetagenomicData")
+```
+
+```{r load_package, echo=FALSE}
+library(curatedMetagenomicData)
+# head(sampleMetadata, 3)
+```
+
+## Instruction
+Headers below are some basic - not comprehensive - guides for this data 
+harmonization task. Please feel free to modify/add any steps or comments
+if you think it's necessary or better. 
+
+Keep in mind that the major goals of this curation/harmonization process are:  
+
+1. Make the metadata more concise by removing redundant information   
+2. Maintain 'correct' information as much as possible     
+3. Identify and fix any errors    
+4. Incorporate controlled terminology (e.g. ontology) if possible   
+5. Make the data more usable and compatible with others
+
+
+
+# Age-related attributes
+## EDA on age-related attributes
+### Q1: How can you identify the columns containing the age-related information? 
+
+
+
+```{r age_EDA, results="hide"}
+# rm(list=ls())
+# Step 1. Use grep to find the colunm name with "age" keyword
+grep("age",colnames(sampleMetadata),ignore.case = TRUE, value=TRUE)
+
+# Step 2. The disease_stage is not age-related, so we modify the regular expression 
+# to either an exact match or with "_" ahead or behind according to the naming rule
+df_age<-sampleMetadata[,grep("_age|age_|^age$", names(sampleMetadata))]
+```
+
+
+
+### Q2: How to handle missing, redundant, or conflicting information? 
+There are three columns including the age-related information at a different
+resolution - `age`, `infant_age`, and `age_category`. However, some samples 
+have redundant or conflicting information in these columns. How can you 
+identify them and how will you handle them?
+
+
+**Ans:** \
+First, we observe those three columns with informations as followed. Then, we 
+further explore the relationship between age categories and their defined age.
+
+colunm_name   data_type   unit     content
+age_category |   str    | labels | newborn, child, school age, adult senior
+age          |   int    | years  | positive intergers and NA
+infant_age   |   int    | days   | positive intergers and NA
+
+Newborn        |  age 0. 
+Child          |  age 1 to 11
+Schoolage      |  age 12 to 18
+Adult          |  age 19 to 65
+Senior         |  age above 65
+
+However, there are some issues with misclassification and unsynchronized 
+conversion between infant age and age. 
+
+**Misclassification**
+It repeatedly happens on the boundary of age segmentation. 
+1. In infant age >=365 days, five data mislabeled newborns. 
+2. At age 19, four data are still schoolage.
+3. At age 65, two data labels senior.
+
+Also, some data of age one called newborn some named child, for example, infant 
+age 428 newborns, in other rows, age 1 is a child, makes the classification 
+conflicts as well as the conversion between the age and infant_age. 
+
+**Unsynchronized Conversion**
+There are 15 samples of infants aged >=365 days, but the age column did not 
+synchronize and is still in 0. Besides, the infant age uses the day as a unit, 
+but age is by year. However, after age 3, there are no more conversions, but 
+leave NA value, which makes this column seem redundant and might cause conflict
+when merging with the age column. 
+
+**Readability**
+There is a naming issue with that infant_age column, but in the age_category, 
+use newborn, which is not intuitive for reading. 
+
+**Handle missing data**
+Lastly, merging two columns is an approach to cleaning since they all belong to
+age data. By this, we can solve their NA values simultaneously, either dropping
+the nan value or imputing. Since it's, only 22588 and with 9035 NA value is 40%.
+So, imputing is necessary to keep essential information and minimize the impact
+on the original data distribution.  
+
+```{r age_cleaning, results="hide"}
+# rm(list=ls())
+# Observe the data frame by age and infant age sorting
+age_cols<-c("age","infant_age","age_category")
+df_sort<-df_age[order(df_age$age,df_age$infant_age),age_cols]
+
+# Print out NA values counts, age= 9035 , infant_age=19695 , age_category =1  
+colSums(is.na(df_sort))
+
+# Drop row with all three columns is the NA value.
+df_sort<-df_sort[!is.na(df_sort$age_category), ]
+colSums(is.na(df_sort))
+
+# Correct the misclassified categories according to the observation. 
+for (i in 1:nrow(df_sort)) {
+  if (!is.na(df_sort$infant_age[i]) && df_sort$infant_age[i] > 364) {
+    df_sort$age_category[i] <- "child"
+  }
+}
+
+for (i in 1:nrow(df_sort)) {
+  if (is.na(df_sort$age[i])) {
+    df_sort$age_category[i] <- df_sort$age_category[i]
+  } else if (df_sort$age[i] == 0) {
+    df_sort$age_category[i] <- "newborn"
+  } else if (df_sort$age[i] > 0 && df_sort$age[i] <= 11) {
+    df_sort$age_category[i] <- "child"
+  } else if (df_sort$age[i] > 11 && df_sort$age[i] <= 18) {
+    df_sort$age_category[i] <- "schoolage"
+  } else if (df_sort$age[i] > 18 && df_sort$age[i] <= 65) {
+    df_sort$age_category[i] <- "adult"
+  } else {
+    df_sort$age_category[i] <- "senior"
+  }
+}
+
+# Correct infant_age range issues
+df_sort$infant_age[df_sort$infant_age > 364] <- NA
+
+
+# Merge age and infant_age into age_all col
+df_sort$age_all <- ifelse(is.na(df_sort$infant_age), df_sort$age, df_sort$infant_age)
+
+# Separate age_all data by age_category 
+df_boot<-split(na.omit(df_sort$age_all),df_sort$age_category)
+
+# Prepare bootstrap samples of each category
+list2env(df_boot, envir = .GlobalEnv)
+
+# Plot hist(category) to see their distribution
+hist(newborn)
+hist(child)
+hist(schoolage)
+hist(adult)
+hist(senior)
+
+# Choose methods with minimized impact on the original data distribution
+# Type 1: newborn, child, senior close to right skew -> median imputing
+# make right skew categories
+rs_category<-c("newborn","child","senior")
+
+# for each category if na value >0 then replace with that category's median value
+for (category in rs_category) {
+  na_indices <- which(is.na(df_sort$age_all) & df_sort$age_category == category)
+  if (length(na_indices) > 0) {
+    category_median <- median(get(category))
+    df_sort$age_all[na_indices] <- category_median
+  }
+}
+
+# Type 2: schoolage close to bell shape -> mean imputing
+df_sort[df_sort$age_category =="schoolage" & is.na(df_sort$age_all),]["age_all"]<-mean(schoolage)
+
+# Type 3: adult seems uniform -> random imputing
+# get the number of missing values in the "adult" category
+na_count <- sum(is.na(df_sort$age_all) & df_sort$age_category == "adult")
+
+if (na_count > 0) {
+  # use sample() to randomly sample values from "adult"
+  sampled_vals <- sample(adult, na_count, replace = TRUE)
+  
+  # use ifelse() to replace missing values in "age_all" with the sampled values
+  df_sort$age_all <- ifelse(is.na(df_sort$age_all) & df_sort$age_category =="adult",
+                            sampled_vals,df_sort$age_all)
+}
+
+# Check out NA values in age_all  
+colSums(is.na(df_sort))
+
+# Name the newborn to the infant for readability.
+df_sort$age_category<-ifelse(df_sort$age_category == "newborn", "infant", df_sort$age_category)
+
+```
+
+
+## Data harmonization
+### Q3: How can we summarize different formats of age-related information?
+Convert heterogeneous age-related information into a harmonized/curated 
+version. For example, converting the age-related information (e.g. age 
+(unit in year) and infant_age (unit in day)) into the same unit (e.g. year).
+
+Here is the example of harmonized age information:
+
+| Source | Original_Value | Original_Unit | Harmonized_Value | Harmonized_Unit | Harmonized_Age_Group |
+|--------|----------------|---------------|------------------|-----------------|----------------------|
+| age | 1 | year | 1 | year | Infant |
+| age | 34 | year | 34 | year | Adult |
+| infant_age | 90 | day | 0.2465753 | year| Infant |
+
+
+**Ans:** \
+Since we have Original_Value from the previous building block, we continue to harmonize the age and infant_age cols in the same unit(year) for the Harmonized_Value and annotate their unit and source information aside.   
+
+
+```{r age_harmonization, results="hide"}
+# Rename age_all to Original_Value
+colnames(df_sort)[4] <- "Original_Value"
+
+# Harmonize age_all and infant_age cols to Harmonized_Value
+df_sort$Harmonized_Value <- ifelse(!is.na(df_sort$infant_age), df_sort$infant_age/365, df_sort$Original_Value)
+
+# Build Harmonized Unit in corresponding 
+df_sort$Harmonized_Unit <- "year"
+
+# Build Source column label its soruce from either age or infant_age
+df_sort$Source <- ifelse(!is.na(df_sort$infant_age), "infant_age", "age")
+
+# Build unit columns for age and infant_age if the value is not NA
+df_sort$Original_Unit <- ifelse(!is.na(df_sort$infant_age), "day","year")
+
+# Rearrange the column order following the example  
+colnames(df_sort)[which(names(df_sort) == "age_category")]<-"Harmonized_Age_Group"
+df_complete <- df_sort[c("Source", "Original_Value", "Original_Unit", "Harmonized_Value", "Harmonized_Unit", "Harmonized_Age_Group")]
+```
+
+## Update the original table with harmonization
+### Q4: Save the new metadata table updated with curated age information.
+
+```{r age_output, results="hide"}
+write.csv(df_complete, "age_table.csv", row.names = FALSE)
+```
+
+
+# Disease-related attributes
+## EDA on disease-related attributes
+### Q1: Identify the columns containing the disease-related information 
+
+
+**Ans:** \
+First, searched the disease keyword and found four columns had it.
+[1] "disease"
+[1] "disease_subtype"
+[1] "disease_stage"
+[1] "disease_location"
+
+Only the disease column records various disease information; the rest three are mostly filled with NA values. Meanwhile, tried correlation among each column based on their NA values because they might have relevant recording patterns if the queue is related to diseases. However, this approach failed and could have been more computationally costly.
+
+Finally, tried scraping all the columns by the values in the disease column,
+and got an extra column, study_condition, and save to df_dis dataframe.
+
+```{r disease_EDA, results="hide"}
+# rm(list=ls())
+# Use grep to find the colunm name with "disease" keyword
+# grep("disease",colnames(sampleMetadata),ignore.case = TRUE, value=TRUE)
+
+# Found all keywords are disease-related, so we save them directly
+df_dis_name<-sampleMetadata[,grep("disease", names(sampleMetadata))]
+
+# Check if any other columns are also with disease information by the value in disease column.
+n<-nrow(sampleMetadata)
+disease_col_value <- sampleMetadata$disease[1:n]
+cols_with_disease <- apply(sampleMetadata, 2, function(x) any(x == disease_col_value, na.rm = TRUE))
+df_dis_content<-sampleMetadata[,cols_with_disease]
+
+# Combine disease name-related and content-related columns and exclude duplicates 
+df_dis_complete<-cbind(df_dis_name,df_dis_content[!names(df_dis_content) %in% names(df_dis_name)])
+
+# Extra. One approach I tried is using correlation by the NA value patterns assuming its recorded synchronized.
+
+# # Create matrix of missingness in a dataframe that stores all col names
+# missingness <- data.frame(matrix(NA, nrow = nrow(sampleMetadata), ncol = ncol(sampleMetadata)))
+# colnames(missingness) <- colnames(sampleMetadata)
+# for (i in 1:nrow(sampleMetadata)) {
+#   missingness[i, ] <- is.na(sampleMetadata[i, ])
+# }
+# missingness <- as.matrix(missingness)
+# 
+# # One-hot-coding missingness matrix, True=1 , FALSE = 0
+# binary_matrix <- ifelse(missingness, 1, 0)
+# 
+# # Calculate correlation matrix of missingness
+# corr_missingness <- cor(binary_matrix)
+# 
+# # Subset the data frame with only disease related columns
+# disease_cols <- c("disease", "disease_subtype", "disease_stage", "disease_location")
+# corr_missingness_sub <- corr_missingness[, disease_cols]
+# 
+# # Find indices of correlated row name with abs correlation values>0.5
+# for (i in 1:nrow(corr_missingness_sub)) {
+#   max_corr <- max(abs(corr_missingness_sub[i,]),na.rm = TRUE)
+#   if (max_corr > 0.5) {
+#     print(rownames(corr_missingness_sub)[i])
+#   }
+# }
+
+# Check the correlated columns manually
+# ajcc -> a staging system used to describe most types of cancer.
+# brinkman_index -> a predictor of chronic obstructive pulmonary disease
+# alcohol_numeric -> number of alcohol blood contains 
+```
+
+
+### Q2: How to handle missing, redundant, or conflicting information? 
+There are three columns including the disease-related information in the 
+`sampleMetadata` table - `study_condition`, `disease`, and `disease_subtype`. 
+They are supposed to represent different kinds of information, but the 
+current metadata table doesn't provide a clear, mutually exclusive definition
+for them. So, we would like to combine these three columns into one. 
+
+
+**Ans:** \
+By observation, the study condition put the name of the disease instead of test and control, and many values were duplicated in the disease column. In the diseases column, some mix with subtypes or with multiple diseases, for example, HF(Heart Failure); CAD(Coronary Artery disease); T2D(Type II Diabetes), and also have spelling errors like schizofrenia. The disease subtype, mostly with NA value, and some terminology is abstract, like CD, UC, and HC, which is not usable.
+
+After cleaning the issues above, there are still 327 row left with different disease information between study condition and disease.  
+
+study_condition
+AS |          FMT           | pre-hypertension | SRP          | cirrhosis
+
+disease 
+RA | TKI_dependent_diarrhoea|   hypertension   | periodontitis| hepatitis
+       metabolic_syndrome 
+         CDI MDRB IBD
+
+1. Fecal microbiota transplantation (FMT) is more like a treatment.
+2. Anti-signal recognition particle (SRP) is an antibody.
+3. Cirrhosis could cause by hepatitis as a result.
+4. Ankylosing Spondylitis (AS) and (RA) are both chronic progressive inflammatory diseases, but RA is a more general disease than AS in the classification of EBI. 
+
+In other words, the disease column contains more general disease
+information than study_condition in the df_dif data frame. After 
+checking, we further subset the data frame and save it as original_value
+for the next task. 
+
+```{r disease_cleaning, results="hide"}
+# rm(list=ls())
+# Observe the data frame 
+dis_cols<-c("study_condition","disease","disease_subtype")
+df<-sampleMetadata[,dis_cols]
+
+# Change control to healty
+df$study_condition<-ifelse(df$study_condition=="control","healthy",df$study_condition)
+
+# Change schizofrenia in disease column to schizophrenia
+df$disease <- gsub("schizofrenia", "schizophrenia", df$disease)
+
+# Split multiple strings in disease column, if it is same as study condition then replace the disease value with study condition 
+for (i in 1:nrow(df)) {
+  diseases <- unlist(strsplit(df$disease[i], ";"))
+  if (any(diseases == df$study_condition[i], na.rm = TRUE)){
+    df$disease[i] <- df$study_condition[i]
+  }
+}
+
+# If study_condition or disease column value is healthy, replace healthy with its corresponding value on the other column 
+for (i in 1:nrow(df)) {
+  if (!is.na(df$disease[i]) & !is.na(df$study_condition[i])) {
+    if (df$study_condition[i] == "healthy") {
+      df$study_condition[i] <- df$disease[i]
+    } else if (df$disease[i] == "healthy") {
+      df$disease[i] <- df$study_condition[i]
+    }
+  }
+}
+
+# Check the rows that in study condition and disease with different values
+df_dif <- data.frame()
+for (i in 1:nrow(df)) {
+  if(!is.na(df$disease[i]) & !is.na(df$study_condition[i])){
+    if(df$disease[i] != df$study_condition[i]){
+      df_dif <- rbind(df_dif, df[i, c("disease", "study_condition","disease_subtype")])
+    }
+  }
+}
+
+# Save as original_value dataframe
+df<-as.data.frame(df$disease)
+
+# Check if all values are string without NA
+all(sapply(df, function(x) class(x) == "character"))
+
+```
+
+
+## Data harmonization
+### Q3: Create a map to incorporate controlled terminologies
+Currently, the disease-related information uses arbitrary language instead
+of ontology terms, making it hard to understand and less compatible to other
+data/existing information. To fix this, we will construct a 'map' that can 
+convert the existing attributes to a manually curated, controlled ontology 
+terms. The resulting 'mapping' table will look like this:
+
+| original_value | curated_ontology_term | curated_ontology_term_id |
+|--------|----------------|---------------|
+| ascaris_lumbricoides | Ascaris lumbricoides | http://purl.obolibrary.org/obo/NCIT_C122177 |
+| CDI | clostridium difficile infection | http://www.ebi.ac.uk/efo/EFO_0009130|
+
+FYI, you don't need to complete this mapping table. Especially, some 
+abbreviations are not obvious and we don't expect you to curate them. 
+In real life, you need to talk with the curator and/or re-visit 
+the original literature to figure it out. (It's too much for a code challenge!!)
+
+
+**Ans:** \
+After observing the JSON object returned by OLS query search, the ontology term and id we want are under the response and docs, the ontology_term_id is the iri value, and the ontology_term is the value of the label. In the docs, there are ten search result objects to choose from, I pick up the second one as the CDI example, but this is unreliable and needs improvement.
+
+At first, I used the merged data frame from the previous building block for mapping the information to the original disease value. However, this process could be done earlier to map all the disease information first, then clean and merge data to make more sense and less guessing.
+
+The final code used all disease terms from study_condition, disease, and disease_subtype to query the term and id information; however, I still need to know how the EBI search engine works or how to set a filter to get the specific disease but not random result. 
+
+```{r disease_harmonization, results="hide"}
+# rm(list=ls())
+# Loading packages
+library(httr)
+library(jsonlite)
+
+dis_cols<-c("study_condition","disease","disease_subtype")
+df_test<-sampleMetadata[,dis_cols]
+
+# Get unique disease from each column
+disease_list <- strsplit(as.character(df_test$disease), ";")
+disease_list <- unique(disease_list)
+
+sub_disease_list <- strsplit(as.character(df_test$disease_subtype), ";")
+sub_list <- unique(na.omit(sub_disease_list))
+sc_list <- unique(na.omit(df_test$study_condition))
+
+
+# Merge unique values, and remove healthy and control save to a data frame column called original_value
+final_list <- c(disease_list, sc_list, sub_list)
+final_list <- unique(unlist(final_list))
+final_list <- final_list[!final_list %in% c("healthy", "control")]
+df_map <- data.frame(original_value = unlist(final_list))
+
+# Define the base URL for the OLS API
+base_url <- "https://www.ebi.ac.uk/ols/api/select?q={query}"
+
+# Query by original value, get JSON object, retrieve its ontology name and iri
+for (i in 1:nrow(df_map)) {
+  search_term <- df_map$original_value[i]
+  response <- GET(paste0(base_url, "search"), query = list(q = search_term))
+  parsed_result <- fromJSON(content(response, as = "text", encoding = "UTF-8"))
+  # If no result return, we give the value with "no term found" and "no id found"
+  if (length(parsed_result$response$docs$id) == 0 || length(parsed_result$response$docs$label) == 0) {
+    df_map$curated_ontology_term[i] <- "no term found"
+    df_map$curated_ontology_term_id[i] <- "no id found"
+    # Otherwise, use the parsed result to retrieve the data we want
+  } else {
+    df_map$curated_ontology_term[i] <- parsed_result$response$docs$label[2]
+    df_map$curated_ontology_term_id[i] <- parsed_result$response$docs$iri[2]
+  }
+}
+
+
+# # The following code was my first try, using the merged data from previous code chunk
+
+# # Change column name to begin
+# names(df)[which(names(df) == "df$disease")] <- "original_value"
+# 
+# # Define the base URL for the OLS API
+# base_url <- "https://www.ebi.ac.uk/ols/api/"
+# 
+# # Remove "healthy" and duplicated values for computational purpose
+# df_sub <- unique(subset(df, original_value != "healthy"))
+# 
+# # Query by original value, get JSON object, retrieve its ontology name and iri
+# for (i in 1:nrow(df_sub)) {
+#   search_term <- df_sub$original_value[i]
+#   response <- GET(paste0(base_url, "search"), query = list(q = search_term))
+#   parsed_result <- fromJSON(content(response, as = "text", encoding = "UTF-8"))
+#   # If no result return, we give the value with "no term found" and "no id found"
+#   if (length(parsed_result$response$docs$id) == 0 || length(parsed_result$response$docs$label) == 0) {
+#     df_sub$curated_ontology_term[i] <- "no term found"
+#     df_sub$curated_ontology_term_id[i] <- "no id found"
+#     # Otherwise, use the parsed result to retrieve the data we want
+#   } else {
+#     df_sub$curated_ontology_term[i] <- parsed_result$response$docs$label[2]
+#     df_sub$curated_ontology_term_id[i] <- parsed_result$response$docs$iri[2]
+#   }
+# }
+# 
+# # Merge the retrieved ontology term and id back to the original dataframe
+# df <- merge(df, df_sub[, c("original_value", "curated_ontology_term", "curated_ontology_term_id")], 
+#             by = "original_value", all.x = TRUE)
+# 
+# # For the healthy value, add "no term found" and "no id found" as well
+# df$curated_ontology_term <- ifelse(df$original_value == "healthy", "no term found", df_sub$curated_ontology_term[match(df$original_value, df_sub$original_value)])
+# df$curated_ontology_term_id <- ifelse(df$original_value == "healthy", "no id found", df_sub$curated_ontology_term_id[match(df$original_value, df_sub$original_value)])
+
+```
+
+
+
+## Update the original table with harmonization
+### Q4: Save the new metadata table updated with curated disease information.
+```{r disease_output, results="hide"}
+write.csv(df_map, "disease_table.csv", row.names = FALSE)
+```
+
